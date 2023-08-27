@@ -31,7 +31,6 @@ global noise_on
 global cut_flag
 global normalize_on
 global input_noise
-global combine_models
 
 
 start_time = time.time()
@@ -150,8 +149,6 @@ class MakeCutouts(torch.nn.Module):
                     offsetx = torch.randint(0, sideX - size + 1, ())
                     offsety = torch.randint(0, sideY - size + 1, ())
                     cutout = input[:, :, offsety:offsety + size, offsetx:offsetx + size]
-                #cutout = F.interpolate(cutout, size=cn_size)
-                #cutout = F.avg_pool2d(cutout, kernel_size=4, stride=2, padding=1)
                 cutout = F.adaptive_avg_pool2d(cutout, self.cut_size)
                 cutouts.append(cutout)
 
@@ -159,8 +156,7 @@ class MakeCutouts(torch.nn.Module):
             for cn in range(self.cutn):
                 cutout = input
                 cutout = F.avg_pool2d(cutout, kernel_size=4, stride=2, padding=1)
-                #cutout = F.interpolate(cutout, size=cn_size)
-                cutouts.append(cutout)  # cutout is of size cut_size ^ 2
+                cutouts.append(cutout)
 
         cutouts = torch.cat(cutouts)  # Concatenate cutouts - the rows
         cutouts = self.augs(cutouts)
@@ -228,38 +224,20 @@ def optimize_network(num_iterations, seed, input_depth, input_dims, optimizer_ty
         optimizer = MADGRAD(DIP_net.parameters(), lr, weight_decay=0.01, momentum=0.9)
 
     # get model
-    if combine_models:
-        classifier1 = torchvision.models.vit_b_16(
+    if model == "VIT_B_16":
+        classifier = torchvision.models.vit_b_16(
             weights=torchvision.models.vision_transformer.ViT_B_16_Weights.IMAGENET1K_V1)
-        mean1 = [0.485, 0.456, 0.406]
-        std1 = [0.229, 0.224, 0.225]
-        classifier2 = torchvision.models.efficientnet_v2_l(
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+    if model == "EFFICIENTNET":
+        classifier = torchvision.models.efficientnet_v2_l(
             weights=torchvision.models.EfficientNet_V2_L_Weights.IMAGENET1K_V1)
-        mean2 = [0.5, 0.5, 0.5]
-        std2 = [0.5, 0.5, 0.5]
+        mean = [0.5, 0.5, 0.5]
+        std = [0.5, 0.5, 0.5]
 
-        classifier1.to(device)
-        classifier1.eval()
-        classifier1 = nn.DataParallel(classifier1)
-
-        classifier2.to(device)
-        classifier2.eval()
-        classifier2 = nn.DataParallel(classifier2)
-    else:
-        if model == "VIT_B_16":
-            classifier = torchvision.models.vit_b_16(
-                weights=torchvision.models.vision_transformer.ViT_B_16_Weights.IMAGENET1K_V1)
-            mean = [0.485, 0.456, 0.406]
-            std = [0.229, 0.224, 0.225]
-        if model == "EFFICIENTNET":
-            classifier = torchvision.models.efficientnet_v2_l(
-                weights=torchvision.models.EfficientNet_V2_L_Weights.IMAGENET1K_V1)
-            mean = [0.5, 0.5, 0.5]
-            std = [0.5, 0.5, 0.5]
-
-        classifier.to(device)
-        classifier.eval()
-        classifier = nn.DataParallel(classifier)
+    classifier.to(device)
+    classifier.eval()
+    classifier = nn.DataParallel(classifier)
 
     # training
     #    try:
@@ -287,31 +265,17 @@ def optimize_network(num_iterations, seed, input_depth, input_dims, optimizer_ty
         if normalize_on:
             normalize_func = kornia.enhance.Normalize(mean, std)
             cutouts = normalize_func(cutouts)
-            # cutouts = T.Normalize(mean, std, inplace=False)
 
-        if combine_models:
-            out1 = classifier1(cutouts)
-            out1 = F.softmax(out1, dim=1)
-
-            out2 = classifier2(cutouts)
-            out2 = F.softmax(out2, dim=1)
-
-            loss1 = 1 - out1[:, logit_idx].mean()
-            loss2 = 1 - out2[:, logit_idx].mean()
-            loss = 0.005 * loss1 + loss2
-        else:
-            out = classifier(cutouts)
-            out = F.softmax(out, dim=1)
-            loss = 1 - out[:, logit_idx].mean()
+        out = classifier(cutouts)
+        out = F.softmax(out, dim=1)
+        loss = 1 - out[:, logit_idx].mean()
 
         loss_list.append(loss)
         loss.backward()
         optimizer.step()
 
         if (i % display_rate) == 0:
-            # with torch.inference_mode():  # context manager to be used when operations will have no interactions with autograd
             image = TF.to_pil_image(dip_out[0])
-            # path = "results/xl/13_cuts/"+folder_name+f'/res_{i}.png'
             path = full_sub_folder + "/" + f'res_{i}.png'
             image.save(path, quality=100)
 
@@ -322,7 +286,6 @@ def optimize_network(num_iterations, seed, input_depth, input_dims, optimizer_ty
 
     # save DIP weights
     torch.save(DIP_net.state_dict(), full_sub_folder + "/net")
-
     return TF.to_pil_image(dip_out[0]), loss_list
 
 
@@ -343,7 +306,6 @@ def train_net(results_folder):
     cutn = 11
     model = "EFFICIENTNET" #"VIT_H_14" # "EFFICIENTNET" #"VIT_B_16"
     input_noise = 1  # determines if input is noise or positional encoding
-    combine_models = False
 
     if input_noise:
         input_depth = 32
@@ -363,36 +325,6 @@ def train_net(results_folder):
     create_log_loss_graph(loss_list, results_folder)
 
     return out
-    # timestring = time.strftime('%Y%m%d%H%M%S')
-    # out.save('final_result_{timestring}.png', quality=100)
-
-"""
-def train_net_only_aug():
-    global aug
-    num_iterations = 10000
-    seed = 1  # random.randint(0, 2 ** 32)
-    input_depth = 3
-    sideY = 512
-    sideX = 512
-    input_dims = (input_depth, sideY, sideX)
-    logit_idx = 1
-    batch_size = 1
-    optimizer_type = 'Adam'
-    lr = 1e-3
-    lower_lr = False
-    display_rate = 100
-    cut_size = 224
-    cutn = 70
-    augs = ["affine", "horizontal", "perspective", "gaussian_blur", "sharpness", "gaussian_noise"]
-    for a in augs:
-        aug = a
-        folder_path = "only_" + a
-        out = optimize_network(num_iterations, seed, input_depth, input_dims, logit_idx, batch_size,
-                               optimizer_type, lr, lower_lr, display_rate, cut_size, cutn, folder_path)
-    return out
-    # timestring = time.strftime('%Y%m%d%H%M%S')
-    # out.save('final_result_{timestring}.png', quality=100)
-"""
 
 def check_classifier():
     seed = 1
@@ -521,14 +453,6 @@ def create_log_loss_graph(loss_list, results_folder):
     plt.title("The Logarithm of the Loss as a Function of the iteration number")
     plt.savefig(path)
 
-def run_xl(xl_path, sharp_on, results_folder, start_idx, end_idx):
-    """
-    runs a few rows from a config excel
-    """
-    for row in range(start_idx, end_idx):
-        get_config_xl(xl_path, row, sharp_on)
-        train_net(results_folder)
-
 def get_config(sharp_on, logit):
     """
     assigns configuration
@@ -562,17 +486,8 @@ def run_config(sharp_on, logit):
     get_config(sharp_on, logit)
     train_net(results_folder)
 
-#xl_path = "configs/configurations.xlsx"
 sharp_on = False
 results_folder_base = "configuration_excel_RESULTS/best_config/no erasing/2500_iters/"
-#start_idx = 0  # 0
-#end_idx = 1    # 32
-#run_xl(xl_path, sharp_on, results_folder, start_idx, end_idx)
-#run_config(sharp_on)
-
-# train_net()
-# check_classifier()
-
 
 classes = [(0, "tench"), (3, "tiger_shark"), (4, "hammerhead"),
            (5, "crampfish"), (7, "cock"), (10, "brambling"),
